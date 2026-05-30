@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>多平台内容发布工具</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="workspace" aria-label="内容编辑工作台">
+        <header class="workspace-header">
+          <div>
+            <p class="eyebrow">Creator Publishing Workspace</p>
+            <h1>多平台内容发布工具</h1>
+          </div>
+          <span class="status-pill">内容编辑器</span>
+        </header>
+
+        <div class="editor-layout">
+          <form class="editor-panel" id="contentForm">
+            <label class="field">
+              <span>标题</span>
+              <input id="titleInput" type="text" placeholder="输入要发布的内容标题" />
+            </label>
+
+            <label class="field">
+              <span>正文</span>
+              <textarea id="bodyInput" rows="14" placeholder="输入正文内容，后续会按平台自动适配"></textarea>
+            </label>
+
+            <label class="field">
+              <span>标签</span>
+              <input id="tagsInput" type="text" placeholder="用逗号分隔，例如 创作,效率,工具" />
+            </label>
+          </form>
+
+          <aside class="preview-panel" aria-label="内容预览">
+            <div class="preview-toolbar">
+              <span>基础预览</span>
+              <span id="wordCount">0 字</span>
+            </div>
+            <article class="preview-card">
+              <h2 id="previewTitle">等待输入标题</h2>
+              <p id="previewBody">在左侧输入正文后，这里会展示内容预览。</p>
+              <div class="tag-list" id="previewTags"></div>
+            </article>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <script src="./src/app.js"></script>
+  </body>
+</html>
