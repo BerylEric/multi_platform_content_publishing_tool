@@ -12,6 +12,10 @@
 - 多平台格式适配
 - 平台发布预览
 - 一键模拟发布
+- 用户注册与登录
+- 后端 session 权限控制
+- 发布任务队列
+- 发布记录持久化
 - 可扩展的平台适配器架构
 
 ## Demo 视频
@@ -34,6 +38,8 @@ go run ./server
 http://localhost:8080
 ```
 
+首次使用时，在页面顶部注册账号。第一个注册用户会自动成为 `admin`，后续用户默认为 `creator`。
+
 ### 静态页面模式
 
 也可以直接打开 `index.html` 体验前端页面。此模式下页面会使用前端本地兜底逻辑完成内容适配和模拟发布。
@@ -53,7 +59,28 @@ http://localhost:8080
 
 - 内容输入编辑器
 - 公众号、知乎、B站、小红书平台适配规则
+- 用户注册、登录、退出和 session 校验
+- 基于 JSON 文件的本地持久化存储
+- 异步发布任务队列
+- 发布历史查询
 - Go 后端适配 API：`POST /api/adapt`
 - Go 后端模拟发布 API：`POST /api/publish/mock`
 - 前端多平台预览和模拟发布交互
+
+## 后端接口
+
+- `POST /api/auth/register`：注册用户
+- `POST /api/auth/login`：登录用户
+- `POST /api/auth/logout`：退出登录
+- `GET /api/me`：获取当前登录用户
+- `POST /api/adapt`：生成多平台适配内容
+- `POST /api/publish/mock`：创建异步模拟发布任务
+- `GET /api/publish/jobs`：查询发布历史
+- `GET /api/publish/jobs?id=任务ID`：查询单个发布任务
+
+## 真实平台发布说明
+
+当前版本已经实现真实后端服务能力，包括登录、权限、持久化、任务队列和发布记录。公众号、知乎、B站、小红书的真实发布需要平台开发者账号、应用审核、OAuth 授权和官方发布 API 权限。
+
+在没有平台授权凭证的情况下，本项目使用 mock publish connector 模拟发布结果；后续接入真实平台时，可以在后端为每个平台新增独立 connector，实现授权、素材上传、发布提交和状态回查。
 

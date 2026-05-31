@@ -1,10 +1,18 @@
 package main
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -30,14 +38,81 @@ type publishResult struct {
 	Detail       string `json:"detail"`
 }
 
+type user struct {
+	ID           string    `json:"id"`
+	Username     string    `json:"username"`
+	PasswordHash string    `json:"passwordHash"`
+	Role         string    `json:"role"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
+type session struct {
+	Token     string    `json:"token"`
+	UserID    string    `json:"userId"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type publishJob struct {
+	ID        string          `json:"id"`
+	UserID    string          `json:"userId"`
+	Content   sourceContent   `json:"content"`
+	Status    string          `json:"status"`
+	Summary   string          `json:"summary"`
+	Results   []publishResult `json:"results"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
+type storeData struct {
+	Users    []user       `json:"users"`
+	Sessions []session    `json:"sessions"`
+	Jobs     []publishJob `json:"jobs"`
+}
+
+type store struct {
+	mu   sync.Mutex
+	path string
+	data storeData
+}
+
+type appServer struct {
+	store *store
+	queue chan string
+}
+
 type adaptResponse struct {
 	Items []adaptedContent `json:"items"`
 }
 
+type authRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type authResponse struct {
+	User  publicUser `json:"user"`
+	Token string     `json:"token"`
+}
+
+type publicUser struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Role     string `json:"role"`
+}
+
 type publishResponse struct {
+	Job     publishJob      `json:"job"`
 	Summary string          `json:"summary"`
 	Items   []publishResult `json:"items"`
 }
+
+type contextKey string
+
+const (
+	sessionCookieName = "mcp_session"
+	sessionTTL        = 24 * time.Hour
+	currentUserKey    = contextKey("currentUser")
+)
 
 type platformAdapter struct {
 	ID    string
@@ -115,16 +190,290 @@ var adapters = []platformAdapter{
 }
 
 func main() {
+	dataStore, err := newStore(filepath.Join("data", "store.json"))
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	server := &appServer{
+		store: dataStore,
+		queue: make(chan string, 100),
+	}
+	go server.runPublishWorker()
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/adapt", handleAdapt)
-	mux.HandleFunc("/api/publish/mock", handleMockPublish)
+	mux.HandleFunc("/api/auth/register", server.handleRegister)
+	mux.HandleFunc("/api/auth/login", server.handleLogin)
+	mux.HandleFunc("/api/auth/logout", server.withAuth(server.handleLogout))
+	mux.HandleFunc("/api/me", server.withAuth(server.handleMe))
+	mux.HandleFunc("/api/adapt", server.withAuth(server.handleAdapt))
+	mux.HandleFunc("/api/publish/mock", server.withAuth(server.handleMockPublish))
+	mux.HandleFunc("/api/publish/jobs", server.withAuth(server.handleJobs))
 	mux.Handle("/", http.FileServer(http.Dir(".")))
 
 	log.Println("server started at http://localhost:8080")
 	log.Fatal(http.ListenAndServe(":8080", withCORS(mux)))
 }
 
-func handleAdapt(w http.ResponseWriter, r *http.Request) {
+func newStore(path string) (*store, error) {
+	s := &store{path: path, data: storeData{}}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+
+	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
+		return s, s.saveLocked()
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(content) == 0 {
+		return s, nil
+	}
+	if err := json.Unmarshal(content, &s.data); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *store) saveLocked() error {
+	content, err := json.MarshalIndent(s.data, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.path, content, 0o600)
+}
+
+func (s *store) createUser(username string, password string) (user, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	username = strings.TrimSpace(username)
+	if username == "" || strings.TrimSpace(password) == "" {
+		return user{}, errors.New("username and password are required")
+	}
+	for _, existingUser := range s.data.Users {
+		if strings.EqualFold(existingUser.Username, username) {
+			return user{}, errors.New("username already exists")
+		}
+	}
+
+	role := "creator"
+	if len(s.data.Users) == 0 {
+		role = "admin"
+	}
+
+	newUser := user{
+		ID:           newID("user"),
+		Username:     username,
+		PasswordHash: hashPassword(password),
+		Role:         role,
+		CreatedAt:    time.Now(),
+	}
+	s.data.Users = append(s.data.Users, newUser)
+	return newUser, s.saveLocked()
+}
+
+func (s *store) authenticate(username string, password string) (user, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, existingUser := range s.data.Users {
+		if strings.EqualFold(existingUser.Username, strings.TrimSpace(username)) && existingUser.PasswordHash == hashPassword(password) {
+			return existingUser, nil
+		}
+	}
+	return user{}, errors.New("invalid username or password")
+}
+
+func (s *store) createSession(userID string) (session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	newSession := session{
+		Token:     newID("session"),
+		UserID:    userID,
+		ExpiresAt: time.Now().Add(sessionTTL),
+	}
+	s.data.Sessions = append(s.data.Sessions, newSession)
+	return newSession, s.saveLocked()
+}
+
+func (s *store) deleteSession(token string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	sessions := s.data.Sessions[:0]
+	for _, item := range s.data.Sessions {
+		if item.Token != token {
+			sessions = append(sessions, item)
+		}
+	}
+	s.data.Sessions = sessions
+	return s.saveLocked()
+}
+
+func (s *store) userBySession(token string) (user, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	var sessionUserID string
+	for _, item := range s.data.Sessions {
+		if item.Token == token && item.ExpiresAt.After(now) {
+			sessionUserID = item.UserID
+			break
+		}
+	}
+	if sessionUserID == "" {
+		return user{}, false
+	}
+
+	for _, item := range s.data.Users {
+		if item.ID == sessionUserID {
+			return item, true
+		}
+	}
+	return user{}, false
+}
+
+func (s *store) createJob(userID string, content sourceContent) (publishJob, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	job := publishJob{
+		ID:        newID("job"),
+		UserID:    userID,
+		Content:   content,
+		Status:    "queued",
+		Summary:   "发布任务已进入队列",
+		Results:   pendingResults(),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	s.data.Jobs = append(s.data.Jobs, job)
+	return job, s.saveLocked()
+}
+
+func (s *store) updateJob(jobID string, update func(*publishJob)) (publishJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for index := range s.data.Jobs {
+		if s.data.Jobs[index].ID == jobID {
+			update(&s.data.Jobs[index])
+			s.data.Jobs[index].UpdatedAt = time.Now()
+			return s.data.Jobs[index], true, s.saveLocked()
+		}
+	}
+	return publishJob{}, false, nil
+}
+
+func (s *store) jobsByUser(userID string, role string) []publishJob {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	jobs := make([]publishJob, 0, len(s.data.Jobs))
+	for _, job := range s.data.Jobs {
+		if role == "admin" || job.UserID == userID {
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
+}
+
+func (s *store) jobByID(userID string, role string, jobID string) (publishJob, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, job := range s.data.Jobs {
+		if job.ID == jobID && (role == "admin" || job.UserID == userID) {
+			return job, true
+		}
+	}
+	return publishJob{}, false
+}
+
+func (s *appServer) handleRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var request authRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+
+	createdUser, err := s.store.createUser(request.Username, request.Password)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	createdSession, err := s.store.createSession(createdUser.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create session failed")
+		return
+	}
+
+	setSessionCookie(w, createdSession)
+	writeJSON(w, http.StatusCreated, authResponse{User: toPublicUser(createdUser), Token: createdSession.Token})
+}
+
+func (s *appServer) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	var request authRequest
+	if !readJSON(w, r, &request) {
+		return
+	}
+
+	currentUser, err := s.store.authenticate(request.Username, request.Password)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, err.Error())
+		return
+	}
+
+	createdSession, err := s.store.createSession(currentUser.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create session failed")
+		return
+	}
+
+	setSessionCookie(w, createdSession)
+	writeJSON(w, http.StatusOK, authResponse{User: toPublicUser(currentUser), Token: createdSession.Token})
+}
+
+func (s *appServer) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
+		_ = s.store.deleteSession(cookie.Value)
+	}
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+}
+
+func (s *appServer) handleMe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]publicUser{"user": toPublicUser(mustCurrentUser(r))})
+}
+
+func (s *appServer) handleAdapt(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -138,7 +487,7 @@ func handleAdapt(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, adaptResponse{Items: adaptContent(content)})
 }
 
-func handleMockPublish(w http.ResponseWriter, r *http.Request) {
+func (s *appServer) handleMockPublish(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
@@ -149,6 +498,114 @@ func handleMockPublish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	currentUser := mustCurrentUser(r)
+	job, err := s.store.createJob(currentUser.ID, content)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "create publish job failed")
+		return
+	}
+	s.queue <- job.ID
+
+	writeJSON(w, http.StatusAccepted, publishResponse{Job: job, Summary: job.Summary, Items: job.Results})
+}
+
+func (s *appServer) handleJobs(w http.ResponseWriter, r *http.Request) {
+	currentUser := mustCurrentUser(r)
+	switch r.Method {
+	case http.MethodGet:
+		jobID := r.URL.Query().Get("id")
+		if jobID != "" {
+			job, ok := s.store.jobByID(currentUser.ID, currentUser.Role, jobID)
+			if !ok {
+				writeError(w, http.StatusNotFound, "job not found")
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]publishJob{"job": job})
+			return
+		}
+
+		writeJSON(w, http.StatusOK, map[string][]publishJob{"jobs": s.store.jobsByUser(currentUser.ID, currentUser.Role)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *appServer) runPublishWorker() {
+	for jobID := range s.queue {
+		_, ok, err := s.store.updateJob(jobID, func(job *publishJob) {
+			job.Status = "running"
+			job.Summary = "正在模拟发布到各平台"
+			job.Results = pendingResults()
+		})
+		if err != nil || !ok {
+			log.Println("start publish job failed:", jobID, err)
+			continue
+		}
+
+		time.Sleep(700 * time.Millisecond)
+
+		_, _, err = s.store.updateJob(jobID, func(job *publishJob) {
+			job.Status = "done"
+			job.Summary, job.Results = buildPublishResults(job.Content)
+		})
+		if err != nil {
+			log.Println("finish publish job failed:", jobID, err)
+		}
+	}
+}
+
+func (s *appServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cookie, err := r.Cookie(sessionCookieName)
+		if err != nil || strings.TrimSpace(cookie.Value) == "" {
+			writeError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+
+		currentUser, ok := s.store.userBySession(cookie.Value)
+		if !ok {
+			writeError(w, http.StatusUnauthorized, "login required")
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), currentUserKey, currentUser)
+		next(w, r.WithContext(ctx))
+	}
+}
+
+func readSourceContent(w http.ResponseWriter, r *http.Request) (sourceContent, bool) {
+	var content sourceContent
+	if !readJSON(w, r, &content) {
+		return sourceContent{}, false
+	}
+
+	content.Title = strings.TrimSpace(content.Title)
+	content.Body = strings.TrimSpace(content.Body)
+	content.Tags = normalizeTags(content.Tags)
+	if content.Title == "" {
+		content.Title = "未命名内容"
+	}
+
+	return content, true
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
+func adaptContent(content sourceContent) []adaptedContent {
+	items := make([]adaptedContent, 0, len(adapters))
+	for _, adapter := range adapters {
+		items = append(items, adapter.Adapt(content))
+	}
+	return items
+}
+
+func buildPublishResults(content sourceContent) (string, []publishResult) {
 	items := adaptContent(content)
 	results := make([]publishResult, 0, len(items))
 	hasBody := strings.TrimSpace(content.Body) != ""
@@ -167,37 +624,23 @@ func handleMockPublish(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result)
 	}
 
-	summary := "全部平台模拟发布完成"
 	if !hasBody {
-		summary = "内容不完整，已生成草稿"
+		return "内容不完整，已生成草稿", results
 	}
-
-	writeJSON(w, http.StatusOK, publishResponse{Summary: summary, Items: results})
+	return "全部平台模拟发布完成", results
 }
 
-func readSourceContent(w http.ResponseWriter, r *http.Request) (sourceContent, bool) {
-	var content sourceContent
-	if err := json.NewDecoder(r.Body).Decode(&content); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid request body")
-		return sourceContent{}, false
-	}
-
-	content.Title = strings.TrimSpace(content.Title)
-	content.Body = strings.TrimSpace(content.Body)
-	content.Tags = normalizeTags(content.Tags)
-	if content.Title == "" {
-		content.Title = "未命名内容"
-	}
-
-	return content, true
-}
-
-func adaptContent(content sourceContent) []adaptedContent {
-	items := make([]adaptedContent, 0, len(adapters))
+func pendingResults() []publishResult {
+	results := make([]publishResult, 0, len(adapters))
 	for _, adapter := range adapters {
-		items = append(items, adapter.Adapt(content))
+		results = append(results, publishResult{
+			PlatformName: adapter.Name,
+			Status:       "pending",
+			Message:      "等待平台响应",
+			Detail:       "模拟任务已创建",
+		})
 	}
-	return items
+	return results
 }
 
 func normalizeTags(tags []string) []string {
@@ -247,6 +690,43 @@ func buildTagText(tags []string) string {
 
 func buildTaskID(index int, platformID string) string {
 	return "任务编号 MOCK-" + time.Now().Format("20060102") + "-" + strings.ToUpper(platformID) + "-" + string(rune('A'+index))
+}
+
+func hashPassword(password string) string {
+	hash := sha256.Sum256([]byte(password))
+	return hex.EncodeToString(hash[:])
+}
+
+func newID(prefix string) string {
+	buffer := make([]byte, 12)
+	if _, err := rand.Read(buffer); err != nil {
+		return prefix + "-" + time.Now().Format("20060102150405")
+	}
+	return prefix + "-" + hex.EncodeToString(buffer)
+}
+
+func toPublicUser(item user) publicUser {
+	return publicUser{
+		ID:       item.ID,
+		Username: item.Username,
+		Role:     item.Role,
+	}
+}
+
+func mustCurrentUser(r *http.Request) user {
+	currentUser, _ := r.Context().Value(currentUserKey).(user)
+	return currentUser
+}
+
+func setSessionCookie(w http.ResponseWriter, item session) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    item.Token,
+		Path:     "/",
+		Expires:  item.ExpiresAt,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func withCORS(next http.Handler) http.Handler {
