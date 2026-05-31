@@ -14,16 +14,18 @@ function parseTags(value) {
 }
 
 function renderPreview() {
-  const title = titleInput.value.trim();
-  const body = bodyInput.value.trim();
-  const tags = parseTags(tagsInput.value);
+  const content = createSourceContent({
+    title: titleInput.value,
+    body: bodyInput.value,
+    tags: parseTags(tagsInput.value),
+  });
 
-  previewTitle.textContent = title || "等待输入标题";
-  previewBody.textContent = body || "在左侧输入正文后，这里会展示内容预览。";
-  wordCount.textContent = `${body.length} 字`;
+  previewTitle.textContent = content.title === "未命名内容" ? "等待输入标题" : content.title;
+  previewBody.textContent = content.body || "在左侧输入正文后，这里会展示内容预览。";
+  wordCount.textContent = `${content.body.length} 字`;
 
   previewTags.replaceChildren(
-    ...tags.map((tag) => {
+    ...content.tags.map((tag) => {
       const tagElement = document.createElement("span");
       tagElement.className = "tag";
       tagElement.textContent = `#${tag}`;
