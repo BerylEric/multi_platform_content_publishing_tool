@@ -20,6 +20,9 @@ const publishResults = document.querySelector("#publishResults");
 const publishSummary = document.querySelector("#publishSummary");
 const refreshHistoryButton = document.querySelector("#refreshHistoryButton");
 const historyList = document.querySelector("#historyList");
+const recordDetailPanel = document.querySelector("#recordDetailPanel");
+const recordDetail = document.querySelector("#recordDetail");
+const closeDetailButton = document.querySelector("#closeDetailButton");
 let activePlatformId = PLATFORM_ADAPTERS[0].id;
 let latestAdaptedContents = [];
 let latestSourceContent = null;
@@ -274,6 +277,7 @@ async function pollJobUntilDone() {
     });
     publishSummary.textContent = data.job.summary;
     renderPublishResults(data.job.results);
+    renderRecordDetail(data.job);
     await loadHistory();
 
     if (data.job.status === "queued" || data.job.status === "running") {
@@ -323,7 +327,13 @@ function renderHistory(jobs) {
         const time = document.createElement("span");
         time.textContent = new Date(job.updatedAt).toLocaleString();
 
-        item.append(title, meta, time);
+        const action = document.createElement("button");
+        action.className = "secondary-button";
+        action.type = "button";
+        action.textContent = "查看详情";
+        action.addEventListener("click", () => loadRecordDetail(job.id));
+
+        item.append(title, meta, time, action);
         return item;
       }),
   );
@@ -334,6 +344,105 @@ function createEmptyHistory() {
   empty.className = "empty-history";
   empty.textContent = "暂无发布记录。";
   return empty;
+}
+
+async function loadRecordDetail(jobId) {
+  try {
+    const data = await requestJSON(`/api/publish/jobs?id=${encodeURIComponent(jobId)}`, {
+      method: "GET",
+    });
+    renderRecordDetail(data.job);
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+function renderRecordDetail(job) {
+  if (!job) {
+    return;
+  }
+
+  recordDetailPanel.classList.remove("hidden");
+  recordDetail.replaceChildren(
+    createDetailSection("原始内容", [
+      ["标题", job.content.title],
+      ["正文", job.content.body || "未填写正文"],
+      ["标签", (job.content.tags || []).join(", ") || "未填写标签"],
+    ]),
+    createAdaptedDetail(job.adaptedContents || []),
+    createPublishResultDetail(job.results || []),
+  );
+}
+
+function createDetailSection(title, rows) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+
+  const heading = document.createElement("h3");
+  heading.textContent = title;
+  section.append(heading);
+
+  rows.forEach(([label, value]) => {
+    const row = document.createElement("div");
+    row.className = "detail-row";
+
+    const labelElement = document.createElement("strong");
+    labelElement.textContent = label;
+
+    const valueElement = document.createElement("p");
+    valueElement.textContent = value;
+
+    row.append(labelElement, valueElement);
+    section.append(row);
+  });
+
+  return section;
+}
+
+function createAdaptedDetail(adaptedContents) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+
+  const heading = document.createElement("h3");
+  heading.textContent = "平台适配内容";
+  section.append(heading);
+
+  adaptedContents.forEach((content) => {
+    const card = document.createElement("article");
+    card.className = "adapted-detail-card";
+
+    const title = document.createElement("h4");
+    title.textContent = `${content.platformName} · ${content.title}`;
+
+    const body = document.createElement("p");
+    body.textContent = content.body;
+
+    const tags = document.createElement("span");
+    tags.textContent = (content.tags || []).map((tag) => `#${tag}`).join(" ");
+
+    card.append(title, body, tags);
+    section.append(card);
+  });
+
+  return section;
+}
+
+function createPublishResultDetail(results) {
+  const section = document.createElement("section");
+  section.className = "detail-section";
+
+  const heading = document.createElement("h3");
+  heading.textContent = "发布结果";
+  section.append(heading);
+
+  results.forEach((result) => {
+    const row = document.createElement("div");
+    row.className = `result-detail-row ${result.status}`;
+    row.textContent = `${result.platformName}：${result.message} · ${result.detail}`;
+    section.append(row);
+  });
+
+  return section;
 }
 
 function renderPlatformTabs(adaptedContents) {
@@ -361,6 +470,9 @@ registerButton.addEventListener("click", () => submitAuth("register"));
 logoutButton.addEventListener("click", logout);
 publishButton.addEventListener("click", simulatePublish);
 refreshHistoryButton.addEventListener("click", loadHistory);
+closeDetailButton.addEventListener("click", () => {
+  recordDetailPanel.classList.add("hidden");
+});
 
 loadCurrentUser().then(loadHistory);
 renderPreview();
