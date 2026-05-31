@@ -86,6 +86,28 @@ type publicPlatformAccount struct {
 	UpdatedAt    time.Time `json:"updatedAt"`
 }
 
+type connectorPublishRequest struct {
+	JobID          string
+	UserID         string
+	Content        sourceContent
+	AdaptedContent adaptedContent
+	Account        *platformAccount
+}
+
+type connectorStatus struct {
+	PlatformName string
+	Status       string
+	Message      string
+	Detail       string
+}
+
+type platformConnector interface {
+	PlatformID() string
+	Publish(context.Context, connectorPublishRequest) connectorStatus
+	GetStatus(context.Context, string) connectorStatus
+	RefreshToken(context.Context, platformAccount) (platformAccount, error)
+}
+
 type storeData struct {
 	Users            []user            `json:"users"`
 	Sessions         []session         `json:"sessions"`
@@ -100,8 +122,9 @@ type store struct {
 }
 
 type appServer struct {
-	store *store
-	queue chan string
+	store      *store
+	queue      chan string
+	connectors map[string]platformConnector
 }
 
 type adaptResponse struct {
@@ -232,8 +255,9 @@ func main() {
 	}
 
 	server := &appServer{
-		store: dataStore,
-		queue: make(chan string, 100),
+		store:      dataStore,
+		queue:      make(chan string, 100),
+		connectors: newConnectorRegistry(),
 	}
 	go server.runPublishWorker()
 
@@ -516,6 +540,19 @@ func (s *store) deletePlatformAccount(userID string, platformID string) error {
 	return s.saveLocked()
 }
 
+func (s *store) platformAccountByUserAndPlatform(userID string, platformID string) (*platformAccount, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, account := range s.data.PlatformAccounts {
+		if account.UserID == userID && account.PlatformID == platformID {
+			accountCopy := account
+			return &accountCopy, true
+		}
+	}
+	return nil, false
+}
+
 func (s *appServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -693,7 +730,7 @@ func buildJobDetail(job publishJob) publishJobDetail {
 
 func (s *appServer) runPublishWorker() {
 	for jobID := range s.queue {
-		_, ok, err := s.store.updateJob(jobID, func(job *publishJob) {
+		runningJob, ok, err := s.store.updateJob(jobID, func(job *publishJob) {
 			job.Status = "running"
 			job.Summary = "正在模拟发布到各平台"
 			job.Results = pendingResults()
@@ -704,15 +741,53 @@ func (s *appServer) runPublishWorker() {
 		}
 
 		time.Sleep(700 * time.Millisecond)
+		summary, results := s.publishThroughConnectors(runningJob.ID, runningJob.UserID, runningJob.Content)
 
 		_, _, err = s.store.updateJob(jobID, func(job *publishJob) {
 			job.Status = "done"
-			job.Summary, job.Results = buildPublishResults(job.Content)
+			job.Summary = summary
+			job.Results = results
 		})
 		if err != nil {
 			log.Println("finish publish job failed:", jobID, err)
 		}
 	}
+}
+
+func (s *appServer) publishThroughConnectors(jobID string, userID string, content sourceContent) (string, []publishResult) {
+	adaptedItems := adaptContent(content)
+	results := make([]publishResult, 0, len(adaptedItems))
+
+	for _, item := range adaptedItems {
+		connector, ok := s.connectors[item.PlatformID]
+		if !ok {
+			results = append(results, publishResult{
+				PlatformName: item.PlatformName,
+				Status:       "failed",
+				Message:      "未找到平台连接器",
+				Detail:       item.PlatformID,
+			})
+			continue
+		}
+
+		account, _ := s.store.platformAccountByUserAndPlatform(userID, item.PlatformID)
+		status := connector.Publish(context.Background(), connectorPublishRequest{
+			JobID:          jobID,
+			UserID:         userID,
+			Content:        content,
+			AdaptedContent: item,
+			Account:        account,
+		})
+
+		results = append(results, publishResult{
+			PlatformName: status.PlatformName,
+			Status:       status.Status,
+			Message:      status.Message,
+			Detail:       status.Detail,
+		})
+	}
+
+	return summarizeConnectorResults(results), results
 }
 
 func (s *appServer) withAuth(next http.HandlerFunc) http.HandlerFunc {
@@ -766,31 +841,6 @@ func adaptContent(content sourceContent) []adaptedContent {
 	return items
 }
 
-func buildPublishResults(content sourceContent) (string, []publishResult) {
-	items := adaptContent(content)
-	results := make([]publishResult, 0, len(items))
-	hasBody := strings.TrimSpace(content.Body) != ""
-
-	for index, item := range items {
-		result := publishResult{
-			PlatformName: item.PlatformName,
-			Status:       "success",
-			Message:      "模拟发布成功",
-			Detail:       buildTaskID(index, item.PlatformID),
-		}
-		if !hasBody {
-			result.Status = "warning"
-			result.Message = "缺少正文，已保存为草稿"
-		}
-		results = append(results, result)
-	}
-
-	if !hasBody {
-		return "内容不完整，已生成草稿", results
-	}
-	return "全部平台模拟发布完成", results
-}
-
 func pendingResults() []publishResult {
 	results := make([]publishResult, 0, len(adapters))
 	for _, adapter := range adapters {
@@ -802,6 +852,92 @@ func pendingResults() []publishResult {
 		})
 	}
 	return results
+}
+
+type mockConnector struct {
+	adapter platformAdapter
+}
+
+func newConnectorRegistry() map[string]platformConnector {
+	registry := make(map[string]platformConnector, len(adapters))
+	for _, adapter := range adapters {
+		registry[adapter.ID] = mockConnector{adapter: adapter}
+	}
+	return registry
+}
+
+func (c mockConnector) PlatformID() string {
+	return c.adapter.ID
+}
+
+func (c mockConnector) Publish(ctx context.Context, request connectorPublishRequest) connectorStatus {
+	if strings.TrimSpace(request.Content.Body) == "" {
+		return connectorStatus{
+			PlatformName: request.AdaptedContent.PlatformName,
+			Status:       "warning",
+			Message:      "缺少正文，已保存为草稿",
+			Detail:       buildTaskID(0, request.AdaptedContent.PlatformID),
+		}
+	}
+
+	if request.Account == nil || request.Account.Status != "connected" {
+		return connectorStatus{
+			PlatformName: request.AdaptedContent.PlatformName,
+			Status:       "warning",
+			Message:      "未绑定真实平台账号，已使用模拟连接器发布",
+			Detail:       buildTaskID(0, request.AdaptedContent.PlatformID),
+		}
+	}
+
+	return connectorStatus{
+		PlatformName: request.AdaptedContent.PlatformName,
+		Status:       "success",
+		Message:      "模拟发布成功",
+		Detail:       buildTaskID(0, request.AdaptedContent.PlatformID),
+	}
+}
+
+func (c mockConnector) GetStatus(ctx context.Context, taskID string) connectorStatus {
+	return connectorStatus{
+		PlatformName: c.adapter.Name,
+		Status:       "success",
+		Message:      "模拟状态查询成功",
+		Detail:       taskID,
+	}
+}
+
+func (c mockConnector) RefreshToken(ctx context.Context, account platformAccount) (platformAccount, error) {
+	account.ExpiresAt = time.Now().Add(30 * 24 * time.Hour)
+	account.UpdatedAt = time.Now()
+	return account, nil
+}
+
+func summarizeConnectorResults(results []publishResult) string {
+	successCount := 0
+	warningCount := 0
+	failedCount := 0
+
+	for _, result := range results {
+		switch result.Status {
+		case "success":
+			successCount++
+		case "warning":
+			warningCount++
+		case "failed":
+			failedCount++
+		}
+	}
+
+	if failedCount > 0 {
+		return "部分平台发布失败"
+	}
+	if warningCount > 0 {
+		return "发布完成，存在需要处理的提醒"
+	}
+	if successCount == len(results) {
+		return "全部平台模拟发布完成"
+	}
+	return "发布任务已完成"
 }
 
 func normalizeTags(tags []string) []string {
