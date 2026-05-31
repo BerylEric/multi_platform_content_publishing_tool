@@ -18,6 +18,8 @@ const logoutButton = document.querySelector("#logoutButton");
 const publishButton = document.querySelector("#publishButton");
 const publishResults = document.querySelector("#publishResults");
 const publishSummary = document.querySelector("#publishSummary");
+const refreshAccountsButton = document.querySelector("#refreshAccountsButton");
+const platformAccountList = document.querySelector("#platformAccountList");
 const refreshHistoryButton = document.querySelector("#refreshHistoryButton");
 const historyList = document.querySelector("#historyList");
 const recordDetailPanel = document.querySelector("#recordDetailPanel");
@@ -28,6 +30,7 @@ let latestAdaptedContents = [];
 let latestSourceContent = null;
 let currentUser = null;
 let currentJobId = null;
+let platformAccounts = [];
 
 function parseTags(value) {
   return value
@@ -179,6 +182,7 @@ async function submitAuth(mode) {
     passwordInput.value = "";
     renderAuthState();
     await renderPreview();
+    await loadPlatformAccounts();
     await loadHistory();
   } catch (error) {
     authMessage.textContent = error.message;
@@ -197,7 +201,9 @@ async function logout() {
 
   currentUser = null;
   currentJobId = null;
+  platformAccounts = [];
   renderAuthState();
+  renderPlatformAccounts([]);
   renderHistory([]);
 }
 
@@ -299,6 +305,113 @@ async function loadHistory() {
       method: "GET",
     });
     renderHistory(data.jobs || []);
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+async function loadPlatformAccounts() {
+  if (!currentUser) {
+    renderPlatformAccounts([]);
+    return;
+  }
+
+  try {
+    const data = await requestJSON("/api/platform-accounts", {
+      method: "GET",
+    });
+    platformAccounts = data.accounts || [];
+    renderPlatformAccounts(platformAccounts);
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+function renderPlatformAccounts(accounts) {
+  const visibleAccounts = accounts.length
+    ? accounts
+    : PLATFORM_ADAPTERS.map((platform) => ({
+        platformId: platform.id,
+        platformName: platform.name,
+        status: "disconnected",
+        accountName: "",
+      }));
+
+  platformAccountList.replaceChildren(
+    ...visibleAccounts.map((account) => {
+      const card = document.createElement("article");
+      card.className = `platform-account-card ${account.status}`;
+
+      const title = document.createElement("h3");
+      title.textContent = account.platformName;
+
+      const status = document.createElement("p");
+      status.textContent = account.status === "connected" ? `已连接：${account.accountName}` : "未连接";
+
+      const input = document.createElement("input");
+      input.type = "text";
+      input.placeholder = "平台账号名称";
+      input.value = account.accountName || "";
+      input.disabled = !currentUser;
+
+      const actions = document.createElement("div");
+      actions.className = "platform-account-actions";
+
+      const connectButton = document.createElement("button");
+      connectButton.className = "secondary-button";
+      connectButton.type = "button";
+      connectButton.textContent = account.status === "connected" ? "更新" : "连接";
+      connectButton.disabled = !currentUser;
+      connectButton.addEventListener("click", () => bindPlatformAccount(account.platformId, input.value));
+
+      const disconnectButton = document.createElement("button");
+      disconnectButton.className = "secondary-button";
+      disconnectButton.type = "button";
+      disconnectButton.textContent = "解绑";
+      disconnectButton.disabled = !currentUser || account.status !== "connected";
+      disconnectButton.addEventListener("click", () => disconnectPlatformAccount(account.platformId));
+
+      actions.append(connectButton, disconnectButton);
+      card.append(title, status, input, actions);
+      return card;
+    }),
+  );
+}
+
+async function bindPlatformAccount(platformId, accountName) {
+  if (!currentUser) {
+    authMessage.textContent = "请先登录后再绑定平台账号。";
+    return;
+  }
+  if (!accountName.trim()) {
+    authMessage.textContent = "请输入平台账号名称。";
+    return;
+  }
+
+  try {
+    await requestJSON("/api/platform-accounts", {
+      method: "POST",
+      body: JSON.stringify({
+        platformId,
+        accountName: accountName.trim(),
+        accessToken: `mock-token-${platformId}`,
+        refreshToken: `mock-refresh-${platformId}`,
+      }),
+    });
+    authMessage.textContent = "平台账号已连接。";
+    await loadPlatformAccounts();
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+async function disconnectPlatformAccount(platformId) {
+  try {
+    await requestJSON(`/api/platform-accounts?platformId=${encodeURIComponent(platformId)}`, {
+      method: "DELETE",
+    });
+    authMessage.textContent = "平台账号已解绑。";
+    await loadPlatformAccounts();
   } catch (error) {
     authMessage.textContent = error.message;
   }
@@ -469,13 +582,18 @@ loginButton.addEventListener("click", () => submitAuth("login"));
 registerButton.addEventListener("click", () => submitAuth("register"));
 logoutButton.addEventListener("click", logout);
 publishButton.addEventListener("click", simulatePublish);
+refreshAccountsButton.addEventListener("click", loadPlatformAccounts);
 refreshHistoryButton.addEventListener("click", loadHistory);
 closeDetailButton.addEventListener("click", () => {
   recordDetailPanel.classList.add("hidden");
 });
 
-loadCurrentUser().then(loadHistory);
+loadCurrentUser().then(() => {
+  loadPlatformAccounts();
+  loadHistory();
+});
 renderPreview();
+renderPlatformAccounts([]);
 renderPublishResults(
   PLATFORM_ADAPTERS.map((platform) => ({
     platformName: platform.name,
