@@ -20,7 +20,7 @@
 
 ## Demo 视频
 
-待补充。
+https://drive.google.com/file/d/14swdJpbfiTN2wepqrnvS_ON4uaerzEBa/view?usp=vids_web
 
 ## 运行方式
 
