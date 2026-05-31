@@ -7,12 +7,24 @@ const previewTags = document.querySelector("#previewTags");
 const previewTips = document.querySelector("#platformTips");
 const platformTabs = document.querySelector("#platformTabs");
 const wordCount = document.querySelector("#wordCount");
+const accountStatus = document.querySelector("#accountStatus");
+const authPanel = document.querySelector("#authPanel");
+const authMessage = document.querySelector("#authMessage");
+const usernameInput = document.querySelector("#usernameInput");
+const passwordInput = document.querySelector("#passwordInput");
+const loginButton = document.querySelector("#loginButton");
+const registerButton = document.querySelector("#registerButton");
+const logoutButton = document.querySelector("#logoutButton");
 const publishButton = document.querySelector("#publishButton");
 const publishResults = document.querySelector("#publishResults");
 const publishSummary = document.querySelector("#publishSummary");
+const refreshHistoryButton = document.querySelector("#refreshHistoryButton");
+const historyList = document.querySelector("#historyList");
 let activePlatformId = PLATFORM_ADAPTERS[0].id;
 let latestAdaptedContents = [];
 let latestSourceContent = null;
+let currentUser = null;
+let currentJobId = null;
 
 function parseTags(value) {
   return value
@@ -38,6 +50,9 @@ async function requestAdaptedContents(content) {
     const data = await response.json();
     return data.items;
   } catch (error) {
+    if (!currentUser) {
+      authMessage.textContent = "登录后将使用 Go 后端适配接口，当前使用前端兜底预览。";
+    }
     return adaptContentForPlatforms(content);
   }
 }
@@ -97,6 +112,92 @@ function renderPublishResults(results) {
   );
 }
 
+function renderAuthState() {
+  if (currentUser) {
+    accountStatus.textContent = `${currentUser.username} · ${currentUser.role}`;
+    authPanel.classList.add("hidden");
+    logoutButton.hidden = false;
+    publishButton.disabled = false;
+    authMessage.textContent = "";
+  } else {
+    accountStatus.textContent = "未登录";
+    authPanel.classList.remove("hidden");
+    logoutButton.hidden = true;
+    publishButton.disabled = true;
+  }
+}
+
+async function requestJSON(url, options = {}) {
+  const response = await fetch(url, {
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(options.headers || {}),
+    },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    throw new Error(data.error || "request failed");
+  }
+
+  return data;
+}
+
+async function loadCurrentUser() {
+  try {
+    const data = await requestJSON("/api/me", {
+      method: "GET",
+    });
+    currentUser = data.user;
+  } catch (error) {
+    currentUser = null;
+  }
+  renderAuthState();
+}
+
+async function submitAuth(mode) {
+  authMessage.textContent = "";
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value.trim();
+
+  if (!username || !password) {
+    authMessage.textContent = "请输入用户名和密码。";
+    return;
+  }
+
+  try {
+    const data = await requestJSON(`/api/auth/${mode}`, {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    });
+    currentUser = data.user;
+    passwordInput.value = "";
+    renderAuthState();
+    await renderPreview();
+    await loadHistory();
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+async function logout() {
+  try {
+    await requestJSON("/api/auth/logout", {
+      method: "POST",
+      body: "{}",
+    });
+  } catch (error) {
+    // Local state still clears if the session has already expired.
+  }
+
+  currentUser = null;
+  currentJobId = null;
+  renderAuthState();
+  renderHistory([]);
+}
+
 async function requestMockPublish(content) {
   try {
     const response = await fetch("/api/publish/mock", {
@@ -111,7 +212,9 @@ async function requestMockPublish(content) {
       throw new Error("publish api failed");
     }
 
-    return await response.json();
+    const data = await response.json();
+    currentJobId = data.job.id;
+    return data;
   } catch (error) {
     const hasBody = bodyInput.value.trim().length > 0;
 
@@ -128,6 +231,10 @@ async function requestMockPublish(content) {
 }
 
 async function simulatePublish() {
+  if (!currentUser) {
+    authMessage.textContent = "请先注册或登录，再创建发布任务。";
+    return;
+  }
   if (!latestAdaptedContents.length) {
     await renderPreview();
   }
@@ -151,7 +258,82 @@ async function simulatePublish() {
     publishButton.textContent = "一键模拟发布";
     publishSummary.textContent = publishResponse.summary;
     renderPublishResults(publishResponse.items);
+    pollJobUntilDone();
+    loadHistory();
   }, 700);
+}
+
+async function pollJobUntilDone() {
+  if (!currentJobId) {
+    return;
+  }
+
+  try {
+    const data = await requestJSON(`/api/publish/jobs?id=${encodeURIComponent(currentJobId)}`, {
+      method: "GET",
+    });
+    publishSummary.textContent = data.job.summary;
+    renderPublishResults(data.job.results);
+    await loadHistory();
+
+    if (data.job.status === "queued" || data.job.status === "running") {
+      window.setTimeout(pollJobUntilDone, 500);
+    }
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+async function loadHistory() {
+  if (!currentUser) {
+    renderHistory([]);
+    return;
+  }
+
+  try {
+    const data = await requestJSON("/api/publish/jobs", {
+      method: "GET",
+    });
+    renderHistory(data.jobs || []);
+  } catch (error) {
+    authMessage.textContent = error.message;
+  }
+}
+
+function renderHistory(jobs) {
+  if (!jobs.length) {
+    historyList.replaceChildren(createEmptyHistory());
+    return;
+  }
+
+  historyList.replaceChildren(
+    ...jobs
+      .slice()
+      .reverse()
+      .map((job) => {
+        const item = document.createElement("article");
+        item.className = "history-item";
+
+        const title = document.createElement("h3");
+        title.textContent = job.content.title;
+
+        const meta = document.createElement("p");
+        meta.textContent = `${job.status} · ${job.summary}`;
+
+        const time = document.createElement("span");
+        time.textContent = new Date(job.updatedAt).toLocaleString();
+
+        item.append(title, meta, time);
+        return item;
+      }),
+  );
+}
+
+function createEmptyHistory() {
+  const empty = document.createElement("p");
+  empty.className = "empty-history";
+  empty.textContent = "暂无发布记录。";
+  return empty;
 }
 
 function renderPlatformTabs(adaptedContents) {
@@ -174,8 +356,13 @@ function renderPlatformTabs(adaptedContents) {
   input.addEventListener("input", renderPreview);
 });
 
+loginButton.addEventListener("click", () => submitAuth("login"));
+registerButton.addEventListener("click", () => submitAuth("register"));
+logoutButton.addEventListener("click", logout);
 publishButton.addEventListener("click", simulatePublish);
+refreshHistoryButton.addEventListener("click", loadHistory);
 
+loadCurrentUser().then(loadHistory);
 renderPreview();
 renderPublishResults(
   PLATFORM_ADAPTERS.map((platform) => ({

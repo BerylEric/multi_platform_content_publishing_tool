@@ -21,6 +21,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+# Runtime data
+data/
+
 # OS and editor files
 .DS_Store
 Thumbs.db

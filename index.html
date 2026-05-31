@@ -14,8 +14,26 @@
             <p class="eyebrow">Creator Publishing Workspace</p>
             <h1>多平台内容发布工具</h1>
           </div>
-          <button class="publish-button" id="publishButton" type="button">一键模拟发布</button>
+          <div class="account-bar">
+            <span id="accountStatus">未登录</span>
+            <button class="secondary-button" id="logoutButton" type="button">退出</button>
+            <button class="publish-button" id="publishButton" type="button">一键模拟发布</button>
+          </div>
         </header>
+
+        <section class="auth-panel" id="authPanel" aria-label="用户登录">
+          <div>
+            <h2>用户登录</h2>
+            <p>注册或登录后，可使用后端适配、异步发布任务和发布记录能力。</p>
+          </div>
+          <div class="auth-form">
+            <input id="usernameInput" type="text" placeholder="用户名" autocomplete="username" />
+            <input id="passwordInput" type="password" placeholder="密码" autocomplete="current-password" />
+            <button class="secondary-button" id="loginButton" type="button">登录</button>
+            <button class="secondary-button" id="registerButton" type="button">注册</button>
+          </div>
+          <span class="auth-message" id="authMessage"></span>
+        </section>
 
         <div class="editor-layout">
           <form class="editor-panel" id="contentForm">
@@ -56,6 +74,14 @@
             <span id="publishSummary">等待发布</span>
           </div>
           <div class="publish-grid" id="publishResults"></div>
+        </section>
+
+        <section class="history-panel" aria-label="发布记录">
+          <div class="publish-header">
+            <h2>发布记录</h2>
+            <button class="secondary-button" id="refreshHistoryButton" type="button">刷新</button>
+          </div>
+          <div class="history-list" id="historyList"></div>
         </section>
       </section>
     </main>
