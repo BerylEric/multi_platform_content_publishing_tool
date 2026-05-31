@@ -63,10 +63,34 @@ type publishJob struct {
 	UpdatedAt time.Time       `json:"updatedAt"`
 }
 
+type platformAccount struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"userId"`
+	PlatformID   string    `json:"platformId"`
+	PlatformName string    `json:"platformName"`
+	AccountName  string    `json:"accountName"`
+	Status       string    `json:"status"`
+	AccessToken  string    `json:"accessToken,omitempty"`
+	RefreshToken string    `json:"refreshToken,omitempty"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
+type publicPlatformAccount struct {
+	ID           string    `json:"id"`
+	PlatformID   string    `json:"platformId"`
+	PlatformName string    `json:"platformName"`
+	AccountName  string    `json:"accountName"`
+	Status       string    `json:"status"`
+	ExpiresAt    time.Time `json:"expiresAt"`
+	UpdatedAt    time.Time `json:"updatedAt"`
+}
+
 type storeData struct {
-	Users    []user       `json:"users"`
-	Sessions []session    `json:"sessions"`
-	Jobs     []publishJob `json:"jobs"`
+	Users            []user            `json:"users"`
+	Sessions         []session         `json:"sessions"`
+	Jobs             []publishJob      `json:"jobs"`
+	PlatformAccounts []platformAccount `json:"platformAccounts"`
 }
 
 type store struct {
@@ -92,6 +116,13 @@ type authRequest struct {
 type authResponse struct {
 	User  publicUser `json:"user"`
 	Token string     `json:"token"`
+}
+
+type platformAccountRequest struct {
+	PlatformID   string `json:"platformId"`
+	AccountName  string `json:"accountName"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
 }
 
 type publicUser struct {
@@ -214,6 +245,7 @@ func main() {
 	mux.HandleFunc("/api/adapt", server.withAuth(server.handleAdapt))
 	mux.HandleFunc("/api/publish/mock", server.withAuth(server.handleMockPublish))
 	mux.HandleFunc("/api/publish/jobs", server.withAuth(server.handleJobs))
+	mux.HandleFunc("/api/platform-accounts", server.withAuth(server.handlePlatformAccounts))
 	mux.Handle("/", http.FileServer(http.Dir(".")))
 
 	log.Println("server started at http://localhost:8080")
@@ -402,6 +434,88 @@ func (s *store) jobByID(userID string, role string, jobID string) (publishJob, b
 	return publishJob{}, false
 }
 
+func (s *store) platformAccountsByUser(userID string) []publicPlatformAccount {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	accounts := make([]publicPlatformAccount, 0, len(adapters))
+	for _, adapter := range adapters {
+		account := publicPlatformAccount{
+			PlatformID:   adapter.ID,
+			PlatformName: adapter.Name,
+			Status:       "disconnected",
+		}
+
+		for _, existing := range s.data.PlatformAccounts {
+			if existing.UserID == userID && existing.PlatformID == adapter.ID {
+				account = toPublicPlatformAccount(existing)
+				break
+			}
+		}
+
+		accounts = append(accounts, account)
+	}
+
+	return accounts
+}
+
+func (s *store) upsertPlatformAccount(userID string, request platformAccountRequest) (publicPlatformAccount, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	adapter, ok := platformAdapterByID(request.PlatformID)
+	if !ok {
+		return publicPlatformAccount{}, errors.New("unsupported platform")
+	}
+	accountName := strings.TrimSpace(request.AccountName)
+	if accountName == "" {
+		return publicPlatformAccount{}, errors.New("account name is required")
+	}
+
+	now := time.Now()
+	for index := range s.data.PlatformAccounts {
+		if s.data.PlatformAccounts[index].UserID == userID && s.data.PlatformAccounts[index].PlatformID == adapter.ID {
+			s.data.PlatformAccounts[index].PlatformName = adapter.Name
+			s.data.PlatformAccounts[index].AccountName = accountName
+			s.data.PlatformAccounts[index].Status = "connected"
+			s.data.PlatformAccounts[index].AccessToken = request.AccessToken
+			s.data.PlatformAccounts[index].RefreshToken = request.RefreshToken
+			s.data.PlatformAccounts[index].ExpiresAt = now.Add(30 * 24 * time.Hour)
+			s.data.PlatformAccounts[index].UpdatedAt = now
+			return toPublicPlatformAccount(s.data.PlatformAccounts[index]), s.saveLocked()
+		}
+	}
+
+	account := platformAccount{
+		ID:           newID("platform"),
+		UserID:       userID,
+		PlatformID:   adapter.ID,
+		PlatformName: adapter.Name,
+		AccountName:  accountName,
+		Status:       "connected",
+		AccessToken:  request.AccessToken,
+		RefreshToken: request.RefreshToken,
+		ExpiresAt:    now.Add(30 * 24 * time.Hour),
+		UpdatedAt:    now,
+	}
+	s.data.PlatformAccounts = append(s.data.PlatformAccounts, account)
+	return toPublicPlatformAccount(account), s.saveLocked()
+}
+
+func (s *store) deletePlatformAccount(userID string, platformID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	accounts := s.data.PlatformAccounts[:0]
+	for _, account := range s.data.PlatformAccounts {
+		if !(account.UserID == userID && account.PlatformID == platformID) {
+			accounts = append(accounts, account)
+		}
+	}
+	s.data.PlatformAccounts = accounts
+	return s.saveLocked()
+}
+
 func (s *appServer) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -530,6 +644,41 @@ func (s *appServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 		}
 
 		writeJSON(w, http.StatusOK, map[string][]publishJob{"jobs": s.store.jobsByUser(currentUser.ID, currentUser.Role)})
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (s *appServer) handlePlatformAccounts(w http.ResponseWriter, r *http.Request) {
+	currentUser := mustCurrentUser(r)
+
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string][]publicPlatformAccount{"accounts": s.store.platformAccountsByUser(currentUser.ID)})
+	case http.MethodPost:
+		var request platformAccountRequest
+		if !readJSON(w, r, &request) {
+			return
+		}
+
+		account, err := s.store.upsertPlatformAccount(currentUser.ID, request)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]publicPlatformAccount{"account": account})
+	case http.MethodDelete:
+		platformID := r.URL.Query().Get("platformId")
+		if _, ok := platformAdapterByID(platformID); !ok {
+			writeError(w, http.StatusBadRequest, "unsupported platform")
+			return
+		}
+
+		if err := s.store.deletePlatformAccount(currentUser.ID, platformID); err != nil {
+			writeError(w, http.StatusInternalServerError, "disconnect platform failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": "platform disconnected"})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -704,9 +853,30 @@ func buildTaskID(index int, platformID string) string {
 	return "任务编号 MOCK-" + time.Now().Format("20060102") + "-" + strings.ToUpper(platformID) + "-" + string(rune('A'+index))
 }
 
+func platformAdapterByID(platformID string) (platformAdapter, bool) {
+	for _, adapter := range adapters {
+		if adapter.ID == platformID {
+			return adapter, true
+		}
+	}
+	return platformAdapter{}, false
+}
+
 func hashPassword(password string) string {
 	hash := sha256.Sum256([]byte(password))
 	return hex.EncodeToString(hash[:])
+}
+
+func toPublicPlatformAccount(account platformAccount) publicPlatformAccount {
+	return publicPlatformAccount{
+		ID:           account.ID,
+		PlatformID:   account.PlatformID,
+		PlatformName: account.PlatformName,
+		AccountName:  account.AccountName,
+		Status:       account.Status,
+		ExpiresAt:    account.ExpiresAt,
+		UpdatedAt:    account.UpdatedAt,
+	}
 }
 
 func newID(prefix string) string {

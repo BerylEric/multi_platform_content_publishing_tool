@@ -296,6 +296,7 @@ textarea:focus {
   line-height: 1.6;
 }
 
+.platform-account-panel,
 .publish-panel,
 .history-panel,
 .detail-panel {
@@ -372,6 +373,46 @@ textarea:focus {
 .publish-result.pending {
   border-color: #bfdbfe;
   background: #eff6ff;
+}
+
+.platform-account-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 16px;
+}
+
+.platform-account-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  padding: 14px;
+  background: #f8fafc;
+}
+
+.platform-account-card.connected {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.platform-account-card h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 16px;
+}
+
+.platform-account-card p {
+  margin: 0;
+  color: #475569;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.platform-account-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .history-list {
@@ -508,6 +549,7 @@ textarea:focus {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .platform-account-grid,
   .publish-grid {
     grid-template-columns: 1fr;
   }
