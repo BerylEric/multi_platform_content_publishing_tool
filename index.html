@@ -14,7 +14,7 @@
             <p class="eyebrow">Creator Publishing Workspace</p>
             <h1>多平台内容发布工具</h1>
           </div>
-          <span class="status-pill">内容编辑器</span>
+          <button class="publish-button" id="publishButton" type="button">一键模拟发布</button>
         </header>
 
         <div class="editor-layout">
@@ -49,6 +49,14 @@
             </article>
           </aside>
         </div>
+
+        <section class="publish-panel" aria-label="模拟发布结果">
+          <div class="publish-header">
+            <h2>发布状态</h2>
+            <span id="publishSummary">等待发布</span>
+          </div>
+          <div class="publish-grid" id="publishResults"></div>
+        </section>
       </section>
     </main>
 
