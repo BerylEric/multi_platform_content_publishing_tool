@@ -106,6 +106,11 @@ type publishResponse struct {
 	Items   []publishResult `json:"items"`
 }
 
+type publishJobDetail struct {
+	publishJob
+	AdaptedContents []adaptedContent `json:"adaptedContents"`
+}
+
 type contextKey string
 
 const (
@@ -520,13 +525,20 @@ func (s *appServer) handleJobs(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusNotFound, "job not found")
 				return
 			}
-			writeJSON(w, http.StatusOK, map[string]publishJob{"job": job})
+			writeJSON(w, http.StatusOK, map[string]publishJobDetail{"job": buildJobDetail(job)})
 			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string][]publishJob{"jobs": s.store.jobsByUser(currentUser.ID, currentUser.Role)})
 	default:
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func buildJobDetail(job publishJob) publishJobDetail {
+	return publishJobDetail{
+		publishJob:      job,
+		AdaptedContents: adaptContent(job.Content),
 	}
 }
 
