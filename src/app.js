@@ -12,6 +12,7 @@ const publishResults = document.querySelector("#publishResults");
 const publishSummary = document.querySelector("#publishSummary");
 let activePlatformId = PLATFORM_ADAPTERS[0].id;
 let latestAdaptedContents = [];
+let latestSourceContent = null;
 
 function parseTags(value) {
   return value
@@ -20,15 +21,37 @@ function parseTags(value) {
     .filter(Boolean);
 }
 
-function renderPreview() {
+async function requestAdaptedContents(content) {
+  try {
+    const response = await fetch("/api/adapt", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(content),
+    });
+
+    if (!response.ok) {
+      throw new Error("adapt api failed");
+    }
+
+    const data = await response.json();
+    return data.items;
+  } catch (error) {
+    return adaptContentForPlatforms(content);
+  }
+}
+
+async function renderPreview() {
   const content = createSourceContent({
     title: titleInput.value,
     body: bodyInput.value,
     tags: parseTags(tagsInput.value),
   });
-  const adaptedContents = adaptContentForPlatforms(content);
+  const adaptedContents = await requestAdaptedContents(content);
   const activeContent = adaptedContents.find((item) => item.platformId === activePlatformId) || adaptedContents[0];
   latestAdaptedContents = adaptedContents;
+  latestSourceContent = content;
 
   renderPlatformTabs(adaptedContents);
   previewTitle.textContent = activeContent.title;
@@ -74,12 +97,41 @@ function renderPublishResults(results) {
   );
 }
 
-function simulatePublish() {
+async function requestMockPublish(content) {
+  try {
+    const response = await fetch("/api/publish/mock", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(content),
+    });
+
+    if (!response.ok) {
+      throw new Error("publish api failed");
+    }
+
+    return await response.json();
+  } catch (error) {
+    const hasBody = bodyInput.value.trim().length > 0;
+
+    return {
+      summary: hasBody ? "全部平台模拟发布完成" : "内容不完整，已生成草稿",
+      items: latestAdaptedContents.map((item, index) => ({
+        platformName: item.platformName,
+        status: hasBody ? "success" : "warning",
+        message: hasBody ? "模拟发布成功" : "缺少正文，已保存为草稿",
+        detail: `任务编号 MOCK-${index + 1}-${item.platformId.toUpperCase()}`,
+      })),
+    };
+  }
+}
+
+async function simulatePublish() {
   if (!latestAdaptedContents.length) {
-    renderPreview();
+    await renderPreview();
   }
 
-  const hasBody = bodyInput.value.trim().length > 0;
   publishButton.disabled = true;
   publishButton.textContent = "发布中...";
   publishSummary.textContent = "正在模拟发布到各平台";
@@ -92,18 +144,13 @@ function simulatePublish() {
   }));
   renderPublishResults(pendingResults);
 
-  window.setTimeout(() => {
-    const results = latestAdaptedContents.map((item, index) => ({
-      platformName: item.platformName,
-      status: hasBody ? "success" : "warning",
-      message: hasBody ? "模拟发布成功" : "缺少正文，已保存为草稿",
-      detail: `任务编号 MOCK-${index + 1}-${item.platformId.toUpperCase()}`,
-    }));
+  window.setTimeout(async () => {
+    const publishResponse = await requestMockPublish(latestSourceContent);
 
     publishButton.disabled = false;
     publishButton.textContent = "一键模拟发布";
-    publishSummary.textContent = hasBody ? "全部平台模拟发布完成" : "内容不完整，已生成草稿";
-    renderPublishResults(results);
+    publishSummary.textContent = publishResponse.summary;
+    renderPublishResults(publishResponse.items);
   }, 700);
 }
 
